@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 type User struct {
@@ -26,12 +31,29 @@ type Profile struct {
 func main() {
 	http.HandleFunc("/", userHandler)
 
-	log.Println("Сервер запущен на порту :8080")
+	server := &http.Server{Addr: ":8080"}
 
-	err := http.ListenAndServe(":8080", nil)
-	if err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Println("Сервер запущен на порту "+server.Addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Ошибка сервера: %v", err)
+		}
+	}()
+
+	<-stop
+	log.Println("Получен сигнал завершения работы сервера...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Ошибка при завершении работы сервера: %v", err)
 	}
+
+	log.Println("Сервер корректно завершил работу")
 }
 
 func userHandler(w http.ResponseWriter, r *http.Request) {
@@ -56,17 +78,28 @@ func userHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getUsers() ([]User, error) {
-	data, err := http.Get("http://83.136.232.77:8091/users")
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", "http://83.136.232.77:8091/users", nil)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка создания запроса: %w", err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка запроса к серверу: %w", err)
 	}
-	
-	var res []User
-	if err := json.NewDecoder(data.Body).Decode(&res); err != nil {
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("неверный статус ответа: %s", resp.Status)
+	}
+
+	var users []User
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
 		return nil, fmt.Errorf("ошибка декодирования JSON: %w", err)
 	}
 
-	return res, nil
+	return users, nil
 }
 
 func dataFilter(users []User) []User {
